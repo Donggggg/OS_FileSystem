@@ -1,8 +1,6 @@
 #include "ssufs-ops.h"
 
 extern struct filehandle_t file_handle_array[MAX_OPEN_FILES];
-void ssufs_readSuperBlock(struct superblock_t*);
-void ssufs_writeSuperBlock(struct superblock_t*);
 
 int ssufs_allocFileHandle() {
 	for(int i = 0; i < MAX_OPEN_FILES; i++) {
@@ -14,16 +12,16 @@ int ssufs_allocFileHandle() {
 }
 
 int ssufs_create(char *filename){
-	/* 1 */
 	int i_index;
 	struct inode_t *tmp = (struct inode_t *) malloc(sizeof(struct inode_t));
 
+	// 예외처리
 	if(open_namei(filename) != -1)
 		return -1;
-
 	if((i_index = ssufs_allocInode()) == -1)
 		return -1;
 
+	// inode 정보 세팅
 	ssufs_readInode(i_index, tmp);
 	tmp->status = INODE_IN_USE;
 	strcpy(tmp->name, filename);
@@ -34,28 +32,47 @@ int ssufs_create(char *filename){
 }
 
 void ssufs_delete(char *filename){
-	/* 2 */
 	int i_index;
+	char *block = (char*)malloc(BLOCKSIZE*sizeof(char));
+	struct inode_t *tmp = (struct inode_t *) malloc(sizeof(struct inode_t));
 
+	// 예외처리
 	if((i_index = open_namei(filename)) == -1)
 		return ;
 
+	// file_handle_array 정리
+	for(int i = 0; i < MAX_OPEN_FILES; i++)
+		if(i_index == file_handle_array[i].inode_number) {
+			file_handle_array[i].inode_number = -1;
+			file_handle_array[i].offset = 0;
+		}
+
+	// disk 정리
+	ssufs_readInode(i_index, tmp); 
+	memset(tmp->name, 0, MAX_NAME_STRLEN);
+	for(int i = 0; i < NUM_INODE_BLOCKS; i++) 
+		if(tmp->direct_blocks[i] != -1) {
+			ssufs_readDataBlock(tmp->direct_blocks[i], block);
+			memset(block, 0, BLOCKSIZE);
+			ssufs_writeDataBlock(tmp->direct_blocks[i], block);
+		}
+
+	ssufs_writeInode(i_index, tmp); 
 	ssufs_freeInode(i_index);
+
 	return ;
 }
 
 int ssufs_open(char *filename){
-	/* 3 */
 	int i_index, t_index;
-	struct inode_t *tmp = (struct inode_t *) malloc(sizeof(struct inode_t));
 
+	// 예외처리
 	if((i_index = open_namei(filename)) == -1)
 		return -1;
+	if((t_index = ssufs_allocFileHandle()) < 0)
+		return -1;
 
-	ssufs_readInode(i_index, tmp); 
-	t_index = ssufs_allocFileHandle();
 	file_handle_array[t_index].inode_number = i_index;
-	free(tmp);
 
 	return t_index;
 }
@@ -66,7 +83,27 @@ void ssufs_close(int file_handle){
 }
 
 int ssufs_read(int file_handle, char *buf, int nbytes){
-	/* 4 */
+	char buffer[BLOCKSIZE*NUM_INODE_BLOCKS];
+	char *block = (char*)malloc(BLOCKSIZE*sizeof(char));
+	struct inode_t *tmp = (struct inode_t *) malloc(sizeof(struct inode_t));
+	memset(buffer, 0, BLOCKSIZE*NUM_INODE_BLOCKS);
+
+	ssufs_readInode(file_handle_array[file_handle].inode_number, tmp);
+
+	if(tmp->file_size < file_handle_array[file_handle].offset+nbytes)
+		return -1;
+
+	for(int i = 0; i < NUM_INODE_BLOCKS; i++)
+		if(tmp->direct_blocks[i] != -1) {
+			ssufs_readDataBlock(tmp->direct_blocks[i], block);
+			strcat(buffer, block);
+		}
+
+	strncpy(buf, buffer+file_handle_array[file_handle].offset, nbytes);
+
+	file_handle_array[file_handle].offset += nbytes;
+	free(tmp);
+	return 0;
 }
 
 int ssufs_write(int file_handle, char *buf, int nbytes){
@@ -75,7 +112,8 @@ int ssufs_write(int file_handle, char *buf, int nbytes){
 	char buffer[BLOCKSIZE*NUM_INODE_BLOCKS];
 	char new_buffer[BLOCKSIZE*NUM_INODE_BLOCKS];
 	char input[BLOCKSIZE];
-	char *block, *start;
+	char *block = (char*)malloc(BLOCKSIZE*sizeof(char));
+	char *start;
 	struct inode_t *tmp = (struct inode_t *) malloc(sizeof(struct inode_t));
 
 	memset(buffer, 0, BLOCKSIZE*NUM_INODE_BLOCKS);
@@ -92,6 +130,7 @@ int ssufs_write(int file_handle, char *buf, int nbytes){
 		}
 
 	strcpy(new_buffer, buffer);
+	new_buffer[BLOCKSIZE*NUM_INODE_BLOCKS] = '\0';
 	strncpy(new_buffer+file_handle_array[file_handle].offset, buf, nbytes); 
 	rest = strlen(new_buffer);
 	start = new_buffer;
@@ -100,9 +139,29 @@ int ssufs_write(int file_handle, char *buf, int nbytes){
 		// 저장완료시 종료
 		if(rest <= 0)
 			break;
-		// 공간이 없으면 새로운 블럭 할당
-		if(tmp->direct_blocks[i] == -1) {
-			tmp->direct_blocks[i] = ssufs_allocDataBlock(); // 공간 더없으면 예외처리해라!!!
+		if(tmp->direct_blocks[i] == -1) { // 공간 없으면 새로운 블록 할당
+			if((tmp->direct_blocks[i] = ssufs_allocDataBlock()) < 0) { // 할당할 블록 부족 시 롤백
+				rest = strlen(buffer);
+				start = buffer;
+				for(int i = 0; i < NUM_INODE_BLOCKS; i++) {
+					if(rest <= 0) { // 추가 할당한 블록 반납
+						if(tmp->direct_blocks[i] != -1) {
+							ssufs_readDataBlock(tmp->direct_blocks[i], block);
+							memset(block, 0, BLOCKSIZE);
+							ssufs_writeDataBlock(tmp->direct_blocks[i], block);
+							ssufs_freeDataBlock(tmp->direct_blocks[i]);
+						}
+					}
+					else {
+						strncpy(input, start, BLOCKSIZE);
+						ssufs_writeDataBlock(tmp->direct_blocks[i], input);
+						start += BLOCKSIZE;
+						rest -= BLOCKSIZE;
+					}
+				}
+				free(tmp);
+				return -1;
+			}
 			char * temp = (char*)malloc(BLOCKSIZE*sizeof(char));
 			ssufs_writeDataBlock(tmp->direct_blocks[i], temp);
 		}
