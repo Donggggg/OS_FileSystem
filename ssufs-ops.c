@@ -88,6 +88,9 @@ int ssufs_read(int file_handle, char *buf, int nbytes){
 	struct inode_t *tmp = (struct inode_t *) malloc(sizeof(struct inode_t));
 	memset(buffer, 0, BLOCKSIZE*NUM_INODE_BLOCKS);
 
+	if(file_handle_array[file_handle].inode_number == -1)
+		return -1;
+
 	ssufs_readInode(file_handle_array[file_handle].inode_number, tmp);
 
 	if(tmp->file_size < file_handle_array[file_handle].offset+nbytes)
@@ -118,6 +121,10 @@ int ssufs_write(int file_handle, char *buf, int nbytes){
 
 	memset(buffer, 0, BLOCKSIZE*NUM_INODE_BLOCKS);
 	memset(new_buffer, 0, BLOCKSIZE*NUM_INODE_BLOCKS);
+
+	if(file_handle_array[file_handle].inode_number == -1)
+		return -1;
+
 	ssufs_readInode(file_handle_array[file_handle].inode_number, tmp);
 
 	if(nbytes + tmp->file_size > BLOCKSIZE * NUM_INODE_BLOCKS)
